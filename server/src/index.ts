@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Node } from "./node.js";
 import { Election } from "./election.js";
+import { READ_ONLY_TOOLS } from "./readOnly.js";
 import { registerTools } from "./tools.js";
 import { VERSION } from "./version.js";
 
@@ -96,6 +97,9 @@ async function main(): Promise<void> {
     version: VERSION,
   });
 
+  const registerTool = server.tool.bind(server) as (name: string, ...rest: unknown[]) => unknown;
+  server.tool = ((name: string, ...rest: unknown[]) =>
+    READ_ONLY_TOOLS.has(name) ? registerTool(name, ...rest) : undefined) as typeof server.tool;
   registerTools(server, node, PORT);
 
   console.error(`Starting MCP server (role: ${node.roleName})`);

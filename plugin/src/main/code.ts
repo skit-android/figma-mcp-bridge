@@ -440,6 +440,25 @@ const EDIT_REQUEST_TYPES = new Set<RequestType>([
   "set_timeline_duration",
 ]);
 
+// Must match READ_ONLY_REQUEST_TYPES in server/src/readOnly.ts.
+const READ_ONLY_REQUEST_TYPES = new Set<RequestType>([
+  "get_document",
+  "get_selection",
+  "get_layout_tree",
+  "get_node",
+  "get_prototype_connections",
+  "trace_prototype_flow",
+  "get_styles",
+  "get_metadata",
+  "get_design_context",
+  "get_variable_defs",
+  "get_screenshot",
+  "get_motion_styles",
+  "get_node_motion",
+  "set_selection",
+  "scroll_and_zoom_into_view",
+]);
+
 const requireEditorMode = (toolName: RequestType): void => {
   // Dev Mode is read-only — every figma.create*/setter throws at runtime there,
   // and the resulting errors are confusing. Reject up front with a clear hint.
@@ -511,6 +530,9 @@ async function getLayoutTree(rootId: string, maxNodes = 2000) {
 
 const handleRequest = async (request: ServerRequest): Promise<PluginResponse> => {
   try {
+    if (!READ_ONLY_REQUEST_TYPES.has(request.type)) {
+      throw new Error(`${request.type} is disabled: this plugin build is read-only`);
+    }
     if (EDIT_REQUEST_TYPES.has(request.type)) {
       requireEditorMode(request.type);
     }
@@ -1317,11 +1339,9 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
             ) {
               throw new Error(`Node does not support fill styles: ${node.id} (${node.type})`);
             }
-            previousStyleId =
-              typeof node.fillStyleId === "symbol" ? "mixed" : node.fillStyleId;
+            previousStyleId = typeof node.fillStyleId === "symbol" ? "mixed" : node.fillStyleId;
             await node.setFillStyleIdAsync(style.id);
-            linkedStyleId =
-              typeof node.fillStyleId === "symbol" ? "mixed" : node.fillStyleId;
+            linkedStyleId = typeof node.fillStyleId === "symbol" ? "mixed" : node.fillStyleId;
           } else {
             if (
               !("setStrokeStyleIdAsync" in node) ||
@@ -1330,11 +1350,9 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
             ) {
               throw new Error(`Node does not support stroke styles: ${node.id} (${node.type})`);
             }
-            previousStyleId =
-              typeof node.strokeStyleId === "symbol" ? "mixed" : node.strokeStyleId;
+            previousStyleId = typeof node.strokeStyleId === "symbol" ? "mixed" : node.strokeStyleId;
             await node.setStrokeStyleIdAsync(style.id);
-            linkedStyleId =
-              typeof node.strokeStyleId === "symbol" ? "mixed" : node.strokeStyleId;
+            linkedStyleId = typeof node.strokeStyleId === "symbol" ? "mixed" : node.strokeStyleId;
           }
 
           if (linkedStyleId !== style.id) {

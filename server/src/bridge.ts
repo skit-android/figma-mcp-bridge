@@ -1,7 +1,13 @@
 import { WebSocketServer, WebSocket } from "ws";
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import { READ_ONLY_REQUEST_TYPES } from "./readOnly.js";
 import type { BridgeRequest, BridgeResponse, ConnectedFile } from "./types.js";
+
+// Figma loads plugin UIs in an opaque-origin iframe, so the plugin's WebSocket handshake carries `Origin: null`.
+const isAllowedOrigin = (origin: string | undefined): boolean =>
+  origin === undefined || origin === "null";
 
 interface PendingRequest {
   resolve: (resp: BridgeResponse) => void;
@@ -21,7 +27,6 @@ export class Bridge {
   private wss: WebSocketServer;
   private connections = new Map<string, ConnectionEntry>();
   private pending = new Map<string, PendingRequest>();
-  private counter = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
@@ -47,6 +52,12 @@ export class Bridge {
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
     if (request.url == undefined) {
       console.error("Plugin connected without url, rejecting");
+      socket.destroy();
+      return;
+    }
+
+    if (!isAllowedOrigin(request.headers.origin)) {
+      console.error(`Rejected plugin connection from origin: ${request.headers.origin}`);
       socket.destroy();
       return;
     }
@@ -88,7 +99,7 @@ export class Bridge {
       try {
         const resp: BridgeResponse = JSON.parse(data.toString());
         const pending = this.pending.get(resp.requestId);
-        if (pending) {
+        if (pending && pending.ws === ws) {
           clearTimeout(pending.timeout);
           this.pending.delete(resp.requestId);
           pending.resolve(resp);
@@ -180,6 +191,11 @@ export class Bridge {
     fileKey?: string
   ): Promise<BridgeResponse> {
     return new Promise((resolve, reject) => {
+      if (!READ_ONLY_REQUEST_TYPES.has(requestType)) {
+        reject(new Error(`${requestType} is disabled: this bridge build is read-only`));
+        return;
+      }
+
       let conn: WebSocket;
       try {
         conn = this.resolveConnection(fileKey);
@@ -223,12 +239,7 @@ export class Bridge {
   }
 
   private nextId(): string {
-    this.counter++;
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, "0");
-    const mm = String(now.getMinutes()).padStart(2, "0");
-    const ss = String(now.getSeconds()).padStart(2, "0");
-    return `req-${hh}${mm}${ss}-${this.counter}`;
+    return `req-${randomUUID()}`;
   }
 
   close(): void {
