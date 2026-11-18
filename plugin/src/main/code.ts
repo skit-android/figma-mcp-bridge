@@ -160,6 +160,123 @@ const serializeVariableValue = (value: VariableValue): unknown => {
   return value;
 };
 
+const colorToHex = ({ r, g, b, a }: RGBA): string => {
+  const channel = (c: number) =>
+    Math.round(c * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${channel(r)}${channel(g)}${channel(b)}${a < 1 ? channel(a) : ""}`;
+};
+
+const toTokenValue = (value: VariableValue): unknown =>
+  typeof value === "object" && value !== null && "r" in value
+    ? colorToHex({ a: 1, ...value })
+    : serializeVariableValue(value);
+
+const isVariableAlias = (value: unknown): value is VariableAlias =>
+  typeof value === "object" && value !== null && (value as VariableAlias).type === "VARIABLE_ALIAS";
+
+type ResolvedVariable = { variable: Variable; collection: VariableCollection | null };
+type VariableLookup = (id: string) => Promise<ResolvedVariable | null>;
+
+const createVariableLookup = (): VariableLookup => {
+  const cache = new Map<string, Promise<ResolvedVariable | null>>();
+  return (id) => {
+    let entry = cache.get(id);
+    if (!entry) {
+      entry = (async () => {
+        const variable = await figma.variables.getVariableByIdAsync(id);
+        if (!variable) return null;
+        const collection = await figma.variables.getVariableCollectionByIdAsync(
+          variable.variableCollectionId
+        );
+        return { variable, collection };
+      })().catch(() => null);
+      cache.set(id, entry);
+    }
+    return entry;
+  };
+};
+
+const resolveBoundVariables = async (
+  node: BaseNode,
+  lookup: VariableLookup
+): Promise<Record<string, unknown> | undefined> => {
+  const bound =
+    "boundVariables" in node
+      ? (node.boundVariables as Record<string, unknown> | undefined)
+      : undefined;
+  if (!bound) return undefined;
+
+  const result: Record<string, unknown> = {};
+  for (const [field, binding] of Object.entries(bound)) {
+    const aliases = (Array.isArray(binding) ? binding : [binding]).filter(isVariableAlias);
+    if (aliases.length === 0) continue;
+    const tokens = await Promise.all(
+      aliases.map(async (alias) => {
+        const resolved = await lookup(alias.id);
+        if (!resolved) return { id: alias.id, unresolved: true };
+        const { variable, collection } = resolved;
+        let value: unknown;
+        try {
+          value = toTokenValue(variable.resolveForConsumer(node as SceneNode).value);
+        } catch {
+          value = undefined;
+        }
+        return {
+          name: variable.name,
+          collection: collection?.name,
+          value,
+          remote: variable.remote,
+        };
+      })
+    );
+    result[field] = Array.isArray(binding) ? tokens : tokens[0];
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+};
+
+const describeUsedVariables = async (roots: readonly SceneNode[], lookup: VariableLookup) => {
+  const ids = new Set<string>();
+  const collect = (node: SceneNode) => {
+    const bound = "boundVariables" in node ? (node.boundVariables as Record<string, unknown>) : {};
+    for (const binding of Object.values(bound ?? {})) {
+      for (const alias of (Array.isArray(binding) ? binding : [binding]).filter(isVariableAlias)) {
+        ids.add(alias.id);
+      }
+    }
+    if ("children" in node) node.children.forEach(collect);
+  };
+  roots.forEach(collect);
+
+  const resolved = (await Promise.all([...ids].map(lookup))).filter(
+    (r): r is ResolvedVariable => r !== null
+  );
+  const describeValue = async (value: VariableValue): Promise<unknown> => {
+    if (!isVariableAlias(value)) return toTokenValue(value);
+    const target = await lookup(value.id);
+    return { alias: target?.variable.name ?? value.id };
+  };
+  return Promise.all(
+    resolved.map(async ({ variable, collection }) => {
+      const modeName = (modeId: string) =>
+        collection?.modes.find((mode) => mode.modeId === modeId)?.name ?? modeId;
+      const values = await Promise.all(
+        Object.entries(variable.valuesByMode).map(
+          async ([modeId, value]) => [modeName(modeId), await describeValue(value)] as const
+        )
+      );
+      return {
+        name: variable.name,
+        collection: collection?.name,
+        resolvedType: variable.resolvedType,
+        remote: variable.remote,
+        valuesByMode: Object.fromEntries(values),
+      };
+    })
+  );
+};
+
 const isSceneNode = (node: BaseNode | null): node is SceneNode =>
   node !== null && node.type !== "DOCUMENT" && node.type !== "PAGE";
 
@@ -567,7 +684,10 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         if (!node || node.type === "DOCUMENT") {
           throw new Error(`Node not found: ${nodeId}`);
         }
-        const data = serializeNode(node as SceneNode);
+        const variables = await resolveBoundVariables(node, createVariableLookup());
+        const data = variables
+          ? { ...serializeNode(node as SceneNode), variables }
+          : serializeNode(node as SceneNode);
         if (!request.params?.includePrototype) {
           return { type: request.type, requestId: request.requestId, data };
         }
@@ -709,11 +829,15 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
       }
       case "get_design_context": {
         const depth = typeof request.params?.depth === "number" ? request.params.depth : 2;
+        const lookup = createVariableLookup();
         const serializeWithDepth = async (
           node: SerializableNode,
           currentDepth: number
         ): Promise<ReturnType<typeof serializeNode>> => {
-          const serialized = serializeNode(node);
+          const variables = await resolveBoundVariables(node, lookup);
+          const serialized = variables
+            ? { ...serializeNode(node), variables }
+            : serializeNode(node);
           if (currentDepth >= depth && serialized.children) {
             // Truncate children at depth limit, but show count
             return {
@@ -845,11 +969,18 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
             };
           })
         );
+        const selection = figma.currentPage.selection;
+        const usedVariables = await describeUsedVariables(
+          selection.length > 0 ? selection : figma.currentPage.children,
+          createVariableLookup()
+        );
         return {
           type: request.type,
           requestId: request.requestId,
           data: {
             collections: variableData,
+            usedVariablesScope: selection.length > 0 ? "selection" : "currentPage",
+            usedVariables,
           },
         };
       }

@@ -222,7 +222,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "get_design_context",
-    "Get the design context for the current selection or page. Returns a summarized tree structure optimized for understanding the current design context. Works in both Figma and FigJam. When multiple files are connected, specify fileKey.",
+    "Get the design context for the current selection or page. Returns a summarized tree structure optimized for understanding the current design context. Nodes bound to variables carry a `variables` map from field (fills, strokes, paddingLeft, itemSpacing, cornerRadius, fontSize, ...) to the token name, collection and the value resolved for that node. Works in both Figma and FigJam. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_design_context.shape,
     async ({ depth, fileKey }): Promise<ToolResult> => {
       const params: Record<string, unknown> = {};
@@ -237,7 +237,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "get_variable_defs",
-    "Get all local variable definitions including variable collections, modes, and variable values. Variables are Figma's system for design tokens (colors, numbers, strings, booleans). When multiple files are connected, specify fileKey.",
+    "Get all local variable definitions including variable collections, modes, and variable values, plus `usedVariables`: every variable bound inside the current selection (or the current page when nothing is selected), including library variables, with its collection and per-mode values (aliases shown by target name). Variables are Figma's system for design tokens (colors, numbers, strings, booleans). When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_variable_defs.shape,
     async ({ fileKey }): Promise<ToolResult> => {
       return renderResponse(() => node.send("get_variable_defs", undefined, fileKey));
@@ -335,9 +335,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
       if (!parsed.success) return parsed.error;
       const { nodeId, nodeIds, fileKey, ...params } = parsed.data;
       const ids = nodeIds ?? (nodeId !== undefined ? [nodeId] : []);
-      return renderResponse(() =>
-        node.sendWithParams("apply_paint_style", ids, params, fileKey)
-      );
+      return renderResponse(() => node.sendWithParams("apply_paint_style", ids, params, fileKey));
     }
   );
 
