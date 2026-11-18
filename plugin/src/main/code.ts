@@ -177,21 +177,33 @@ const isVariableAlias = (value: unknown): value is VariableAlias =>
   typeof value === "object" && value !== null && (value as VariableAlias).type === "VARIABLE_ALIAS";
 
 type ResolvedVariable = { variable: Variable; collection: VariableCollection | null };
-type VariableLookup = (id: string) => Promise<ResolvedVariable | null>;
+type VariableLookupResult = ResolvedVariable | { error: string };
+type VariableLookup = (id: string) => Promise<VariableLookupResult>;
+
+const VARIABLE_LOOKUP_TIMEOUT_MS = 5000;
 
 const createVariableLookup = (): VariableLookup => {
-  const cache = new Map<string, Promise<ResolvedVariable | null>>();
+  const cache = new Map<string, Promise<VariableLookupResult>>();
   return (id) => {
     let entry = cache.get(id);
     if (!entry) {
-      entry = (async () => {
+      const lookup = (async (): Promise<VariableLookupResult> => {
         const variable = await figma.variables.getVariableByIdAsync(id);
-        if (!variable) return null;
+        if (!variable) return { error: "variable not found" };
         const collection = await figma.variables.getVariableCollectionByIdAsync(
           variable.variableCollectionId
         );
         return { variable, collection };
-      })().catch(() => null);
+      })();
+      const timeout = new Promise<VariableLookupResult>((resolve) =>
+        setTimeout(
+          () => resolve({ error: `lookup timed out after ${VARIABLE_LOOKUP_TIMEOUT_MS}ms` }),
+          VARIABLE_LOOKUP_TIMEOUT_MS
+        )
+      );
+      entry = Promise.race([lookup, timeout]).catch((err: unknown) => ({
+        error: err instanceof Error ? err.message : String(err),
+      }));
       cache.set(id, entry);
     }
     return entry;
@@ -215,7 +227,7 @@ const resolveBoundVariables = async (
     const tokens = await Promise.all(
       aliases.map(async (alias) => {
         const resolved = await lookup(alias.id);
-        if (!resolved) return { id: alias.id, unresolved: true };
+        if ("error" in resolved) return { id: alias.id, unresolved: resolved.error };
         const { variable, collection } = resolved;
         let value: unknown;
         try {
@@ -250,12 +262,12 @@ const describeUsedVariables = async (roots: readonly SceneNode[], lookup: Variab
   roots.forEach(collect);
 
   const resolved = (await Promise.all([...ids].map(lookup))).filter(
-    (r): r is ResolvedVariable => r !== null
+    (r): r is ResolvedVariable => !("error" in r)
   );
   const describeValue = async (value: VariableValue): Promise<unknown> => {
     if (!isVariableAlias(value)) return toTokenValue(value);
     const target = await lookup(value.id);
-    return { alias: target?.variable.name ?? value.id };
+    return { alias: "variable" in target ? target.variable.name : value.id };
   };
   return Promise.all(
     resolved.map(async ({ variable, collection }) => {
